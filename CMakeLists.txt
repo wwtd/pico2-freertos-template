@@ -1,29 +1,30 @@
 cmake_minimum_required(VERSION 3.13)
 
-# !!! 关键：指定板子是 Pico 2 !!!
 set(PICO_BOARD pico2)
 
 include(pico_sdk_import.cmake)
 
-project(blink C CXX ASM)
+project(pico2-freertos-demo C CXX ASM)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
 pico_sdk_init()
 
-add_executable(blink
-    blink.c
+set(FREERTOS_KERNEL_PATH ${CMAKE_CURRENT_SOURCE_DIR}/FreeRTOS-Kernel)
+set(FREERTOS_CONFIG_FILE_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/config)
+include(${FREERTOS_KERNEL_PATH}/portable/ThirdParty/GCC/RP2350_ARM_NTZ/FreeRTOS_Kernel_import.cmake)
+
+add_executable(pico2_freertos_demo
+    main.c
 )
 
-# Pico 2 使用 SDK 的标准库
-target_link_libraries(blink
+target_link_libraries(pico2_freertos_demo PRIVATE
     pico_stdlib
+    FreeRTOS-Kernel-Heap4
 )
 
-# 启用 USB / UART（你现在 USB 有问题，但先开着）
-pico_enable_stdio_usb(blink 1)
-pico_enable_stdio_uart(blink 0)
+pico_enable_stdio_usb(pico2_freertos_demo 1)
+pico_enable_stdio_uart(pico2_freertos_demo 1)
 
-# 生成 UF2 / ELF / BIN
-pico_add_extra_outputs(blink)
+pico_add_extra_outputs(pico2_freertos_demo)

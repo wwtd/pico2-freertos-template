@@ -53,3 +53,10 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Build output
+build/
+_deps/
+
+# UF2 binary (released via GitHub Releases)
+*.uf2
