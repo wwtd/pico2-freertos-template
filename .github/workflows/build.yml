@@ -1,0 +1,36 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install ARM GCC toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi cmake build-essential
+
+      - name: Configure
+        run: cmake -B build -DPICO_BOARD=pico2
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Archive artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico2-freertos-demo
+          path: |
+            build/*.uf2
+            build/*.elf
+            build/*.bin
