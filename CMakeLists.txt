@@ -17,6 +17,7 @@ include(${FREERTOS_KERNEL_PATH}/portable/ThirdParty/GCC/RP2350_ARM_NTZ/FreeRTOS_
 
 add_executable(pico2_freertos_demo
     main.c
+    inspector.c
 )
 
 target_link_libraries(pico2_freertos_demo PRIVATE
