@@ -4,85 +4,162 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-#define INSPECTOR_DELAY_MS  2000
-#define MAX_TASKS           16
+#define MAX_TASKS    16
+#define TIMELINE_W   72
 
-static const char *task_state_name(eTaskState state) {
-    switch (state) {
-    case eRunning:   return "RUN";
-    case eReady:     return "RDY";
-    case eBlocked:   return "BLK";
-    case eSuspended: return "SUS";
-    case eDeleted:   return "DEL";
-    default:         return "???";
+/* ── timeline ring buffer ────────────────────────── */
+
+static struct {
+    TaskHandle_t handle;
+    char         name[12 + 1];
+    char         trace[TIMELINE_W];    /* 0 = oldest, TIMELINE_W-1 = newest */
+} tl_tracks[MAX_TASKS];
+
+static int tl_count = 0;
+
+static int tl_find(TaskHandle_t h) {
+    for (int i = 0; i < tl_count; i++)
+        if (tl_tracks[i].handle == h) return i;
+    return -1;
+}
+
+static int tl_find_or_add(TaskHandle_t h, const char *name) {
+    int i = tl_find(h);
+    if (i >= 0) return i;
+    if (tl_count >= MAX_TASKS) return -1;
+    i = tl_count++;
+    tl_tracks[i].handle = h;
+    snprintf(tl_tracks[i].name, sizeof(tl_tracks[i].name), "%s", name);
+    memset(tl_tracks[i].trace, ' ', TIMELINE_W);
+    return i;
+}
+
+/* ── snapshot: called every SAMPLE_MS ────────────── */
+
+#define SAMPLE_MS  100
+
+static void shift_and_sample(void) {
+    static TaskStatus_t status[MAX_TASKS];
+
+    /* shift all traces left by 1 */
+    for (int t = 0; t < tl_count; t++)
+        memmove(tl_tracks[t].trace, tl_tracks[t].trace + 1, TIMELINE_W - 1);
+
+    /* snapshot current task states */
+    UBaseType_t n = uxTaskGetNumberOfTasks();
+    if (n > MAX_TASKS) n = MAX_TASKS;
+    n = uxTaskGetSystemState(status, n, NULL);
+
+    for (UBaseType_t i = 0; i < n; i++) {
+        int idx = tl_find_or_add(status[i].xHandle, status[i].pcTaskName);
+        if (idx < 0) continue;
+
+        char c;
+        switch (status[i].eCurrentState) {
+        case eRunning: c = '#'; break;
+        case eReady:   c = '-'; break;
+        case eBlocked: c = '.'; break;
+        default:       c = ' '; break;
+        }
+        tl_tracks[idx].trace[TIMELINE_W - 1] = c;
     }
 }
 
-static void print_dash(size_t n) {
-    for (size_t i = 0; i < n; i++) putchar('-');
-}
+/* ── render table + timeline ─────────────────────── */
 
-static void print_header(void) {
-    printf(" %-12s %-5s %-4s %-6s %-6s %s\n",
-           "Task", "State", "Prio", "Affin", "StkRm", "Handle");
-    print_dash(12 + 1 + 5 + 1 + 4 + 1 + 6 + 1 + 6 + 1 + 10);
-    putchar('\n');
-}
+static void print_dash(int n) { while (n--) putchar('-'); }
 
-static void print_row(const TaskStatus_t *s) {
+static void render(int ansi_up) {
+    printf("\r");
+
+    if (ansi_up) {
+        printf("\033[%dA", tl_count * 2 + 6);
+    }
+
+    /* ── timeline ── */
+    printf(" Timeline (time >)                              last %ums\n",
+           TIMELINE_W * SAMPLE_MS);
+    print_dash(TIMELINE_W + 16); printf("\n");
+    for (int t = 0; t < tl_count; t++) {
+        char sym = tl_tracks[t].trace[TIMELINE_W - 1];
+        printf("  %-12s ", tl_tracks[t].name);
+        for (int x = 0; x < TIMELINE_W; x++) putchar(tl_tracks[t].trace[x]);
+        printf("  %c\n", sym);
+    }
+    printf("\n");
+
+    /* ── status table ── */
+    {
+        static TaskStatus_t s[MAX_TASKS];
+        UBaseType_t n = uxTaskGetNumberOfTasks();
+        if (n > MAX_TASKS) n = MAX_TASKS;
+        n = uxTaskGetSystemState(s, n, NULL);
+
+        printf(" %-12s %-5s %-4s %-6s %-6s %s\n",
+               "Task", "State", "Prio", "Affin", "StkRm", "Handle");
+        print_dash(12 + 1 + 5 + 1 + 4 + 1 + 6 + 1 + 6 + 1 + 10);
+        printf("\n");
+
+        for (UBaseType_t i = 0; i < n; i++) {
+            const char *st = "???";
+            switch (s[i].eCurrentState) {
+            case eRunning:   st = "RUN";  break;
+            case eReady:     st = "RDY";  break;
+            case eBlocked:   st = "BLK";  break;
+            case eSuspended: st = "SUS";  break;
+            case eDeleted:   st = "DEL";  break;
+            }
+
+            char aff[8] = "—";
 #if (configUSE_CORE_AFFINITY == 1) && (configNUMBER_OF_CORES > 1)
-    char affinity[8];
-    if (s->uxCoreAffinityMask == 0xFF) {
-        snprintf(affinity, sizeof(affinity), "any");
-    } else if (s->uxCoreAffinityMask == (1 << 0)) {
-        snprintf(affinity, sizeof(affinity), "core0");
-    } else if (s->uxCoreAffinityMask == (1 << 1)) {
-        snprintf(affinity, sizeof(affinity), "core1");
-    } else {
-        snprintf(affinity, sizeof(affinity), "both");
-    }
-#else
-    const char *affinity = "—";
+            if (s[i].uxCoreAffinityMask == 0xFF)
+                snprintf(aff, sizeof(aff), "any");
+            else if (s[i].uxCoreAffinityMask == (1 << 0))
+                snprintf(aff, sizeof(aff), "core0");
+            else if (s[i].uxCoreAffinityMask == (1 << 1))
+                snprintf(aff, sizeof(aff), "core1");
+            else
+                snprintf(aff, sizeof(aff), "both");
 #endif
+            unsigned stk = s[i].usStackHighWaterMark;
+            if (stk > 0xFFFF) stk = 0;
 
-    unsigned stack_words = s->usStackHighWaterMark;
-    if (stack_words > 0xFFFF) stack_words = 0;
+            printf(" %-12s %-5s %-4u %-6s %-6u 0x%08lX\n",
+                   s[i].pcTaskName, st,
+                   (unsigned)s[i].uxCurrentPriority,
+                   aff, stk,
+                   (unsigned long)(uintptr_t)s[i].xHandle);
+        }
+    }
 
-    printf(" %-12s %-5s %-4u %-6s %-6u 0x%08lX\n",
-           s->pcTaskName,
-           task_state_name(s->eCurrentState),
-           (unsigned)s->uxCurrentPriority,
-           affinity,
-           stack_words,
-           (unsigned long)(uintptr_t)s->xHandle);
+    /* tick counter */
+    printf(" tick %-6lu  total %-2u  @ %u ms/sample\n",
+           (unsigned long)xTaskGetTickCount(),
+           (unsigned)uxTaskGetNumberOfTasks(),
+           SAMPLE_MS);
 }
 
-static void vInspectTask(__unused void *params) {
-    static TaskStatus_t tasks[MAX_TASKS];
+/* ── inspector task ──────────────────────────────── */
+
+static void vInspectorTask(__unused void *param) {
+    TickType_t xLast = xTaskGetTickCount();
+
+    int first = 1;
 
     for (;;) {
-        UBaseType_t count = uxTaskGetNumberOfTasks();
-        if (count > MAX_TASKS) count = MAX_TASKS;
-        count = uxTaskGetSystemState(tasks, count, NULL);
+        shift_and_sample();
+        render(!first);
+        first = 0;
 
-        printf("\n--- FreeRTOS Task List @ tick %lu ---\n",
-               (unsigned long)xTaskGetTickCount());
-        printf("  %u task(s)\n", (unsigned)count);
-        print_header();
-        for (UBaseType_t i = 0; i < count; i++) {
-            print_row(&tasks[i]);
-        }
-        putchar('\n');
-
-        vTaskDelay(pdMS_TO_TICKS(INSPECTOR_DELAY_MS));
+        vTaskDelayUntil(&xLast, pdMS_TO_TICKS(SAMPLE_MS));
     }
 }
 
-void vStartInspector(UBaseType_t uxPriority) {
+void vStartInspector(UBaseType_t prio) {
     TaskHandle_t h;
-    xTaskCreateAffinitySet(vInspectTask, "inspector",
+    xTaskCreateAffinitySet(vInspectorTask, "inspector",
                            configMINIMAL_STACK_SIZE * 2,
-                           NULL, uxPriority,
+                           NULL, prio,
                            (1 << 0) | (1 << 1), &h);
     (void)h;
 }
