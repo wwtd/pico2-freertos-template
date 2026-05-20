@@ -45,10 +45,14 @@ static void shift_and_sample(void) {
     for (int t = 0; t < tl_count; t++)
         memmove(tl_tracks[t].trace, tl_tracks[t].trace + 1, TIMELINE_W - 1);
 
-    /* snapshot current task states */
+    /* snapshot current task states + per-core running */
     UBaseType_t n = uxTaskGetNumberOfTasks();
     if (n > MAX_TASKS) n = MAX_TASKS;
     n = uxTaskGetSystemState(status, n, NULL);
+
+    TaskHandle_t core_task[configNUMBER_OF_CORES];
+    for (int c = 0; c < configNUMBER_OF_CORES; c++)
+        core_task[c] = xTaskGetCurrentTaskHandleForCore(c);
 
     for (UBaseType_t i = 0; i < n; i++) {
         int idx = tl_find_or_add(status[i].xHandle, status[i].pcTaskName);
@@ -56,7 +60,13 @@ static void shift_and_sample(void) {
 
         char c;
         switch (status[i].eCurrentState) {
-        case eRunning: c = '#'; break;
+        case eRunning: {
+            int on = -1;
+            for (int core = 0; core < configNUMBER_OF_CORES; core++)
+                if (core_task[core] == status[i].xHandle) { on = core; break; }
+            c = (on >= 0) ? ('0' + on) : '#';
+            break;
+        }
         case eReady:   c = '-'; break;
         case eBlocked: c = '.'; break;
         default:       c = ' '; break;
@@ -77,7 +87,7 @@ static void render(int ansi_up) {
     }
 
     /* ── timeline ── */
-    printf(" Timeline (time >)                              last %ums\n",
+    printf(" Timeline (time >)       0/1=running on core        last %ums\n",
            TIMELINE_W * SAMPLE_MS);
     print_dash(TIMELINE_W + 16); printf("\n");
     for (int t = 0; t < tl_count; t++) {
@@ -157,9 +167,8 @@ static void vInspectorTask(__unused void *param) {
 
 void vStartInspector(UBaseType_t prio) {
     TaskHandle_t h;
-    xTaskCreateAffinitySet(vInspectorTask, "inspector",
-                           configMINIMAL_STACK_SIZE * 2,
-                           NULL, prio,
-                           (1 << 0) | (1 << 1), &h);
+    xTaskCreate(vInspectorTask, "inspector",
+                configMINIMAL_STACK_SIZE * 2,
+                NULL, prio, &h);
     (void)h;
 }
